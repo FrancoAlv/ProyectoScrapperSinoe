@@ -1,0 +1,28 @@
+{
+  "name": "proyectocej",
+  "version": "1.0.0",
+  "description": "Ethical web scraping service for AWS Fargate",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node run-local.js",
+    "scrape": "node scrape-only.js",
+    "setup": "node setup.js",
+    "test-forms": "node test-forms.js",
+    "test-captcha": "node test-captcha.js",
+    "test-ai": "node test-ai-captcha.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "scraping",
+    "fargate",
+    "aws"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "puppeteer": "^24.17.0",
+    "dotenv": "^16.0.0",
+    "openai": "^4.28.0"
+  }
+}
