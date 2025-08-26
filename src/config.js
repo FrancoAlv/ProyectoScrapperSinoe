@@ -12,6 +12,60 @@ class Config {
       targetUrls: process.env.TARGET_URLS ? process.env.TARGET_URLS.split(',') : [],
       outputBucket: process.env.S3_BUCKET || null,
       logLevel: process.env.LOG_LEVEL || 'info',
+
+      // WhatsApp configuration - Multi-user support
+      whatsapp: {
+        enabled: process.env.WHATSAPP_ENABLED === 'true',
+        sessionPrefix: process.env.WHATSAPP_SESSION_PREFIX || 'sinoe',
+        headless: process.env.WHATSAPP_HEADLESS !== 'false',
+        notificationPhone: process.env.WHATSAPP_NOTIFICATION_PHONE || '',
+        testPhone: process.env.WHATSAPP_TEST_PHONE || '',
+        logIncomingMessages: process.env.WHATSAPP_LOG_INCOMING === 'true',
+        logMessageStatus: process.env.WHATSAPP_LOG_MESSAGE_STATUS === 'true',
+        sendOnSuccess: process.env.WHATSAPP_SEND_ON_SUCCESS === 'true',
+        sendOnError: process.env.WHATSAPP_SEND_ON_ERROR === 'true',
+        // Multi-user configuration
+        users: (() => {
+          try {
+            return process.env.WHATSAPP_USERS ? JSON.parse(process.env.WHATSAPP_USERS) : [
+              {
+                name: 'user1',
+                phone: process.env.WHATSAPP_USER1_PHONE || '',
+                email: process.env.WHATSAPP_USER1_EMAIL || '',
+                receiveNotifications: process.env.WHATSAPP_USER1_NOTIFICATIONS === 'true'
+              }
+            ];
+          } catch {
+            return [{
+              name: 'user1',
+              phone: process.env.WHATSAPP_USER1_PHONE || '',
+              email: process.env.WHATSAPP_USER1_EMAIL || '',
+              receiveNotifications: true
+            }];
+          }
+        })()
+      },
+
+      // Email configuration for QR codes (AWS SES)
+      email: {
+        enabled: process.env.EMAIL_ENABLED === 'true',
+        host: process.env.HOST || 'email-smtp.us-east-1.amazonaws.com',
+        port: parseInt(process.env.EMAIL_PORT || '587'),
+        secure: process.env.EMAIL_SECURE === 'true',
+        userEmail: process.env.USEREMAIL || '', // AWS SES SMTP username
+        passEmail: process.env.PASSEMAIL || '', // AWS SES SMTP password
+        emailUser: process.env.EMAILUSER || 'admin@obstelig.com', // Sender display name
+        emailClient: process.env.EMAILCLIENT || 'franco.caralv@gmail.com' // Default recipient
+      },
+
+      // AWS S3 configuration for session storage
+      aws: {
+        enabled: process.env.AWS_S3_ENABLED === 'true',
+        accessKeyId: process.env.AWS_ACCESS_KEY_ID || '',
+        secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY || '',
+        region: process.env.AWS_REGION || 'us-east-1',
+        bucket: process.env.AWS_S3_BUCKET || 'sinoe-whatsapp-sessions'
+      },
       
       // Browser configuration
       browser: {

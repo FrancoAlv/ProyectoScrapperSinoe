@@ -42,10 +42,10 @@ class WebScraper {
         throw new Error(`HTTP ${response.status()}: ${response.statusText()}`);
       }
 
-      // Fill inputs after page loads
-      await this.formFiller.fillInputs(page);
+      // Fill inputs after page loads and get extracted data
+      const formResult = await this.formFiller.fillInputs(page);
 
-      // Extract data based on selector
+      // Extract data based on selector (generic scraping)
       const data = await this.extractData(page, selector);
 
       // Get page metadata
@@ -64,10 +64,15 @@ class WebScraper {
         data,
         dataCount: data.length,
         status: 'success',
-        inputsFound: true
+        inputsFound: true,
+        // Include extracted data from FormFiller if available
+        extractedData: formResult?.extractedData || null
       };
 
-      this.logger.info(`Successfully scraped ${url}`, { dataCount: data.length });
+      this.logger.info(`Successfully scraped ${url}`, { 
+        dataCount: data.length,
+        notificationsFound: formResult?.extractedData?.recordCount || 0
+      });
       
       // Close page after delay
       setTimeout(() => {

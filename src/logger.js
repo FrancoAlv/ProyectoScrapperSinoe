@@ -8,7 +8,7 @@ class Logger {
     const timestamp = new Date().toISOString();
     const logEntry = { timestamp, level, message, data };
     
-    if (level === 'error' || this.logLevel === 'debug') {
+    if (level === 'error' || level === 'warn' || this.logLevel === 'debug') {
       console.log(JSON.stringify(logEntry));
     } else if (this.logLevel === 'info' && level !== 'debug') {
       console.log(JSON.stringify(logEntry));
@@ -25,6 +25,10 @@ class Logger {
 
   error(message, data = null) {
     this.log('error', message, data);
+  }
+
+  warn(message, data = null) {
+    this.log('warn', message, data);
   }
 }
 

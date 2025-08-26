@@ -7,6 +7,7 @@
     "start": "node index.js",
     "dev": "node run-local.js",
     "scrape": "node scrape-only.js",
+    "production": "node run-production.js",
     "setup": "node setup.js",
     "test-forms": "node test-forms.js",
     "test-captcha": "node test-captcha.js",
@@ -21,8 +22,11 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "puppeteer": "^24.17.0",
+    "aws-sdk": "^2.1692.0",
     "dotenv": "^16.0.0",
-    "openai": "^4.28.0"
+    "nodemailer": "^7.0.5",
+    "openai": "^4.28.0",
+    "puppeteer": "^24.17.0",
+    "venom-bot": "^5.3.0"
   }
 }

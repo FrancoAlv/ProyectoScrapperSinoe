@@ -9,13 +9,25 @@ class FormFiller {
   constructor(config, logger) {
     this.config = config.formFilling;
     this.logger = logger;
+    this.fullConfig = config;
     
-    // Initialize modules
+    // Initialize modules (removed WhatsAppManager - handled by EthicalScraper)
     this.fieldManager = new FormFieldManager(config, logger);
     this.validator = new LoginValidator(config, logger);
     this.sessionManager = new SessionManager(config, logger);
     this.navigationManager = new NavigationManager(config, logger);
     this.dataExtractor = new DataExtractor(config, logger);
+  }
+
+  async initialize() {
+    try {
+      // FormFiller initialization (WhatsApp now handled by EthicalScraper)
+      this.logger.info('🔧 FormFiller initialized - ready for scraping');
+      return true;
+    } catch (error) {
+      this.logger.error('Error during FormFiller initialization:', error.message);
+      return false;
+    }
   }
 
   async fillInputs(page) {
@@ -39,15 +51,18 @@ class FormFiller {
 
       // Submit form if enabled
       if (this.config.loginAutomation.autoSubmit) {
-        await this.submitFormWithRetry(page);
+        const result = await this.submitFormWithRetry(page);
+        return result; // Return the extracted data from successful login
       } else {
         // Wait to see results
         this.logger.info(`Waiting ${this.config.waitTime}ms to see the results...`);
         await this.wait(this.config.waitTime);
+        return null;
       }
 
     } catch (error) {
       this.logger.error('Error filling inputs:', error.message);
+      return null;
     }
   }
 
@@ -111,8 +126,8 @@ class FormFiller {
       const loginResult = await this.validator.checkLoginResult(page);
       
       if (loginResult === 'SUCCESS') {
-        await this.handleSuccessfulLogin(page);
-        return;
+        const result = await this.handleSuccessfulLogin(page);
+        return result;
       } else if (loginResult === 'SSO_REDIRECT') {
         await this.handleSSORedirect(page);
         continue;
@@ -134,11 +149,14 @@ class FormFiller {
       
       if (retryCount > maxRetries) {
         this.logger.error(`❌ Max retries (${maxRetries}) reached. Login failed.`);
-        return;
+        return { success: false, extractedData: null };
       }
       
       await this.wait(2000);
     }
+    
+    // If we exit the loop without success
+    return { success: false, extractedData: null };
   }
 
   async handleSuccessfulLogin(page) {
@@ -149,7 +167,7 @@ class FormFiller {
     if (navigationSuccess) {
       this.logger.info('✅ Successfully navigated to Casillas Electrónicas');
       
-      // Extract notifications data
+      // Extract notifications data - this will be handled by EthicalScraper for notifications
       const notificationsData = await this.dataExtractor.extractNotificationsData(page);
       if (notificationsData && notificationsData.length > 0) {
         this.logger.info(`✅ Extracted ${notificationsData.length} notification records`);
@@ -165,8 +183,23 @@ class FormFiller {
       } else {
         this.logger.info('⚠️ Could not perform final logout');
       }
+
+      // Return extracted data for EthicalScraper to handle notifications
+      return {
+        success: true,
+        extractedData: {
+          timestamp: new Date().toISOString(),
+          source: 'SINOE - Sistema de Notificaciones Electrónicas',
+          recordCount: notificationsData ? notificationsData.length : 0,
+          notifications: notificationsData || []
+        }
+      };
     } else {
       this.logger.info('⚠️ Login successful but could not navigate to Casillas Electrónicas');
+      return {
+        success: false,
+        extractedData: null
+      };
     }
   }
 
@@ -268,6 +301,16 @@ class FormFiller {
 
     } catch (error) {
       this.logger.debug('Error checking for login status:', error.message);
+    }
+  }
+
+  async cleanup() {
+    try {
+      this.logger.info('🧹 Performing FormFiller cleanup...');
+      // FormFiller cleanup (WhatsApp cleanup handled by EthicalScraper)
+      this.logger.info('✅ FormFiller cleanup completed');
+    } catch (error) {
+      this.logger.error('❌ Error during FormFiller cleanup:', error.message);
     }
   }
 
