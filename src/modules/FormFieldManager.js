@@ -190,7 +190,7 @@ class FormFieldManager {
       }
 
       // Determine what to fill based on input characteristics
-      const value = this.determineValueForInput(inputDetails);
+      const value = await this.determineValueForInput(page, inputDetails);
       if (value) {
         this.logger.info(`Filling remaining input ${i + 1} (${inputDetails.placeholder || inputDetails.name || inputDetails.id}) with: ${value}`);
         await this.fillInput(page, input, value);

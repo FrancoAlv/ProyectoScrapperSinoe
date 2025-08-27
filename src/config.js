@@ -66,22 +66,47 @@ class Config {
         region: process.env.AWS_REGION || 'us-east-1',
         bucket: process.env.AWS_S3_BUCKET || 'sinoe-whatsapp-sessions'
       },
+
+      // AWS DynamoDB configuration for data storage
+      dynamodb: {
+        enabled: process.env.DYNAMODB_ENABLED === 'true',
+        accessKeyId: process.env.AWS_ACCESS_KEY_ID || '',
+        secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY || '',
+        region: process.env.DYNAMODB_REGION || process.env.AWS_REGION || 'us-east-1',
+        tableName: process.env.DYNAMODB_TABLE_NAME || 'DocumentosSinoe'
+      },
       
       // Browser configuration
       browser: {
-        headless: process.env.HEADLESS === 'true' ? true : false,
-        slowMo: parseInt(process.env.SLOW_MO || '1000'),
-        devtools: process.env.DEVTOOLS !== 'false',
+        headless: process.env.HEADLESS === 'true' ? 'new' : false,
+        slowMo: parseInt(process.env.SLOW_MO || '100'),
+        devtools: false,
         defaultViewport: { width: 1280, height: 720 },
+        executablePath: process.env.LAMBDA_MODE === 'true' ? '/usr/bin/chromium' : undefined,
+        timeout: 60000,
         args: [
           '--no-sandbox',
           '--disable-setuid-sandbox',
           '--disable-dev-shm-usage',
           '--disable-gpu',
+          '--disable-gpu-sandbox',
+          '--disable-software-rasterizer',
           '--no-first-run',
           '--no-zygote',
-          '--deterministic-fetch',
+          '--disable-extensions',
+          '--disable-default-apps',
+          '--disable-background-networking',
+          '--disable-sync',
+          '--disable-translate',
+          '--hide-scrollbars',
+          '--metrics-recording-only',
+          '--mute-audio',
+          '--no-default-browser-check',
+          '--safebrowsing-disable-auto-update',
+          '--disable-client-side-phishing-detection',
           '--disable-features=TranslateUI',
+          '--disable-features=BlinkGenPropertyTrees',
+          '--disable-features=VizDisplayCompositor',
           '--disable-ipc-flooding-protection'
         ]
       },

@@ -2,7 +2,15 @@
   "permissions": {
     "allow": [
       "Bash(npm install:*)",
-      "Bash(mkdir:*)"
+      "Bash(mkdir:*)",
+      "Bash(aws configure set:*)",
+      "Bash(aws configure get:*)",
+      "Bash(cmd:*)",
+      "Bash(docker:*)",
+      "Bash(aws:*)",
+      "Bash(set AWS_REGION=us-east-1)",
+      "Bash(set SINOE_USERNAME=154154)",
+      "Bash(powershell:*)"
     ],
     "deny": [],
     "ask": []

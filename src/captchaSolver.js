@@ -35,6 +35,8 @@ class CaptchaSolver {
 
       // Capture image as base64
       const imageBase64 = await this.captureImageBase64(page, captchaImage);
+      this.logger.info(`Captcha image base64 length: ${imageBase64 ? imageBase64.length : 0}`);
+      this.logger.info(`Captcha image base64 snippet: ${imageBase64 ? imageBase64.substring(0, 30) + '...' : 'N/A'}`);
       if (!imageBase64) {
         this.logger.error('❌ Failed to capture captcha image');
         return { text: this.getManualCaptchaValue(), confidence: 0 };
@@ -89,9 +91,31 @@ class CaptchaSolver {
       });
       
       if (imageBuffer) {
-        const base64 = imageBuffer.toString('base64');
-        this.logger.debug(`Captured captcha image: ${base64.length} characters base64`);
-        return base64;
+        // Debug: Check if we got bytes array instead of Buffer
+        if (Array.isArray(imageBuffer)) {
+          this.logger.info(`Got bytes array: ${imageBuffer.slice(0, 10)}...`);
+          // Convert byte array to Buffer
+          const buffer = Buffer.from(imageBuffer);
+          const base64 = buffer.toString('base64');
+          this.logger.info(`Converted array to base64: ${base64.length} characters`);
+          return base64;
+        } else if (Buffer.isBuffer(imageBuffer)) {
+          const base64 = imageBuffer.toString('base64');
+          this.logger.info(`Buffer to base64: ${base64.length} characters`);
+          return base64;
+        } else if (typeof imageBuffer === 'object') {
+          // Handle object with numeric properties (Uint8Array-like)
+          this.logger.info(`Got object with bytes: ${String(imageBuffer).substring(0, 50)}`);
+          const bytesArray = Object.values(imageBuffer);
+          this.logger.info(`Extracted ${bytesArray.length} bytes`);
+          const buffer = Buffer.from(bytesArray);
+          const base64 = buffer.toString('base64');
+          this.logger.info(`Converted object bytes to base64: ${base64.length} characters`);
+          return base64;
+        } else {
+          this.logger.error(`Unexpected image data type: ${typeof imageBuffer}`);
+          this.logger.info(`First few values: ${String(imageBuffer).substring(0, 50)}`);
+        }
       }
 
       // Method 2: Get image src if it's a data URL

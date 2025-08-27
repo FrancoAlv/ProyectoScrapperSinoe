@@ -4,6 +4,7 @@ const Logger = require('./logger');
 const WebScraper = require('./scraper');
 const ResultSaver = require('./resultSaver');
 const WhatsAppManager = require('./modules/whatsapp/WhatsAppManager');
+const DynamoDBManager = require('./modules/database/DynamoDBManager');
 
 class EthicalScraper {
   constructor() {
@@ -17,6 +18,7 @@ class EthicalScraper {
     this.scraper = new WebScraper(this.config, this.logger);
     this.resultSaver = new ResultSaver(this.config, this.logger);
     this.whatsappManager = WhatsAppManager.getInstance(this.config, this.logger);
+    this.dynamodbManager = new DynamoDBManager(this.config.dynamodb, this.logger);
     this.results = [];
     this.extractedData = null; // Store extracted notifications data
 
@@ -80,6 +82,18 @@ class EthicalScraper {
         }
       }
 
+      // Initialize DynamoDB system
+      if (this.config.dynamodb?.enabled) {
+        this.logger.info('🗄️ Initializing DynamoDB system...');
+        const dynamodbInitialized = await this.dynamodbManager.initialize();
+        
+        if (dynamodbInitialized) {
+          this.logger.info('✅ DynamoDB system initialized successfully');
+        } else {
+          this.logger.warn('⚠️ DynamoDB initialization failed, continuing without database storage');
+        }
+      }
+
       // Initialize web scraper
       await this.scraper.initialize();
 
@@ -107,6 +121,9 @@ class EthicalScraper {
 
       // Save results
       await this.resultSaver.saveResults(this.results);
+      
+      // Save to DynamoDB if we have extracted data
+      await this.saveToDynamoDB();
       
       // Send WhatsApp notifications if we have extracted data
       await this.sendNotifications();
@@ -177,6 +194,57 @@ class EthicalScraper {
       
     } catch (error) {
       this.logger.error('❌ Error sending notifications:', error.message);
+      return false;
+    }
+  }
+
+  async saveToDynamoDB() {
+    try {
+      if (!this.config.dynamodb?.enabled) {
+        this.logger.debug('📄 DynamoDB disabled - skipping database save');
+        return false;
+      }
+
+      if (!this.dynamodbManager.isInitialized) {
+        this.logger.warn('⚠️ DynamoDB not initialized - skipping database save');
+        return false;
+      }
+
+      if (!this.extractedData || !this.extractedData.notifications) {
+        this.logger.info('📄 No notifications data to save to DynamoDB');
+        return false;
+      }
+
+      const notificationsCount = this.extractedData.notifications.length;
+      this.logger.info(`💾 Saving ${notificationsCount} notifications to DynamoDB...`);
+
+      // Get the source URL from the first result
+      const sourceUrl = this.results.length > 0 ? this.results[0].url : 'SINOE';
+
+      const results = await this.dynamodbManager.saveNotifications(
+        this.extractedData.notifications, 
+        sourceUrl
+      );
+
+      if (results.success > 0) {
+        this.logger.info(`✅ DynamoDB save completed: ${results.success}/${notificationsCount} saved (${results.newRecords} new, ${results.updatedRecords} updated)`);
+        
+        // Log any errors that occurred
+        if (results.errors.length > 0) {
+          this.logger.warn(`⚠️ Some DynamoDB saves had errors: ${results.failed} failed`);
+          results.errors.slice(0, 3).forEach(error => {
+            this.logger.debug(`  - ${error}`);
+          });
+        }
+        
+        return true;
+      } else {
+        this.logger.error(`❌ All DynamoDB saves failed: ${results.failed}/${notificationsCount}`);
+        return false;
+      }
+
+    } catch (error) {
+      this.logger.error('❌ Error saving to DynamoDB:', error.message);
       return false;
     }
   }
@@ -381,6 +449,11 @@ class EthicalScraper {
       // Close WhatsApp connections and clear intervals
       if (this.whatsappManager) {
         await this.whatsappManager.close();
+      }
+
+      // Close DynamoDB connections
+      if (this.dynamodbManager) {
+        await this.dynamodbManager.close();
       }
       
       this.logger.info('✅ Cleanup completed');
