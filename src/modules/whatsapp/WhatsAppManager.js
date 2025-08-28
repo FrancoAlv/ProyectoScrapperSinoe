@@ -1,4 +1,4 @@
-// WhatsApp messaging module using venom-bot with multi-user support - Singleton Pattern with Observer
+// WhatsApp messaging module using venom-bot with single client - Singleton Pattern with Observer
 const venom = require('venom-bot');
 const EmailManager = require('../email/EmailManager');
 const S3SessionManager = require('../storage/S3SessionManager');
@@ -17,18 +17,51 @@ class WhatsAppManager extends EventEmitter {
     this.config = config.whatsapp || {};
     this.fullConfig = config;
     this.logger = logger;
-    this.clients = new Map(); // Store multiple client instances
-    this.users = this.config.users || [];
+    this.client = null; // Single WhatsApp client
+    this.clientUser = this.parseClientUser(); // Single connecting user
+    this.notificationRecipients = this.parseRecipients(); // Multiple notification recipients
     this.emailManager = new EmailManager(config, logger);
     this.s3SessionManager = new S3SessionManager(config, logger);
     this.isInitialized = false;
-    this.connectionStates = new Map(); // Track connection states
+    this.isConnected = false;
 
     // Store the singleton instance
     WhatsAppManager.instance = this;
 
     // Set up observers for connection events
     this.setupObservers();
+  }
+
+  parseClientUser() {
+    try {
+      // Use config first, then environment variable as fallback
+      if (this.config.clientUser) {
+        return this.config.clientUser;
+      }
+      // Fallback to environment variable
+      if (process.env.WHATSAPP_CLIENT_USER) {
+        return JSON.parse(process.env.WHATSAPP_CLIENT_USER);
+      }
+      return { name: 'main', phone: '', email: '' };
+    } catch {
+      return { name: 'main', phone: '', email: '' };
+    }
+  }
+
+  parseRecipients() {
+    try {
+      // Use config first, then environment variable as fallback
+      if (this.config.recipients && this.config.recipients.length > 0) {
+        return this.config.recipients;
+      }
+      // Fallback to environment variable
+      if (process.env.WHATSAPP_RECIPIENTS) {
+        return JSON.parse(process.env.WHATSAPP_RECIPIENTS);
+      }
+      return [];
+    } catch {
+      return [];
+    }
   }
 
   // Static method to get the singleton instance
@@ -57,15 +90,10 @@ class WhatsAppManager extends EventEmitter {
 
   async initialize() {
     try {
-      this.logger.info('🚀 Initializing WhatsApp multi-user system...');
+      this.logger.info('🚀 Initializing WhatsApp system...');
       
       if (!this.config.enabled) {
         this.logger.info('⚠️ WhatsApp is disabled in configuration');
-        return false;
-      }
-
-      if (!this.users || this.users.length === 0) {
-        this.logger.error('❌ No WhatsApp users configured');
         return false;
       }
 
@@ -74,7 +102,7 @@ class WhatsAppManager extends EventEmitter {
         whatsappEnabled: this.config.enabled,
         emailEnabled: this.fullConfig.email?.enabled,
         s3Enabled: this.fullConfig.aws?.enabled,
-        usersCount: this.users.length
+        recipientsCount: this.notificationRecipients.length
       });
 
       // Initialize email and S3 services
@@ -84,21 +112,11 @@ class WhatsAppManager extends EventEmitter {
       const s3Initialized = await this.s3SessionManager.initialize();
       this.logger.debug(`☁️ S3 initialization result: ${s3Initialized}`);
 
-      // Initialize each user's WhatsApp client
-      const initPromises = this.users.map(user => this.initializeUserClient(user));
-      const results = await Promise.allSettled(initPromises);
-
-      let successCount = 0;
-      results.forEach((result, index) => {
-        if (result.status === 'fulfilled' && result.value) {
-          successCount++;
-        } else {
-          this.logger.error(`❌ Failed to initialize client for user: ${this.users[index].name}`);
-        }
-      });
-
-      this.isInitialized = successCount > 0;
-      this.logger.info(`✅ WhatsApp system initialized: ${successCount}/${this.users.length} clients ready`);
+      // Initialize single WhatsApp client
+      const clientInitialized = await this.initializeClient();
+      
+      this.isInitialized = clientInitialized;
+      this.logger.info(`✅ WhatsApp system initialized: ${clientInitialized ? 'Connected' : 'Failed'}`);
       
       // Start periodic connection verification
       if (this.isInitialized) {
@@ -113,11 +131,11 @@ class WhatsAppManager extends EventEmitter {
     }
   }
 
-  async initializeUserClient(user) {
+  async initializeClient() {
     try {
-      this.logger.info(`🚀 Initializing WhatsApp for user: ${user.name}`);
+      this.logger.info(`🚀 Initializing WhatsApp client...`);
       
-      const sessionName = `${this.config.sessionPrefix || 'sinoe'}-${user.name}`;
+      const sessionName = `${this.config.sessionPrefix || 'sinoe'}-main`;
       const sessionPath = path.join(process.env.LAMBDA_MODE === 'true' ? '/tmp' : process.cwd(), 'tokens', sessionName);
 
       // Try to download session from S3 if available
@@ -166,7 +184,14 @@ class WhatsAppManager extends EventEmitter {
         disableSpins: true, // Disable loading spinners in headless
         createPathFileToken: true,
         folderNameToken: process.env.LAMBDA_MODE === 'true' ? '/tmp/tokens' : './tokens',
-        // Lambda-specific Puppeteer options
+        // Custom QR handler
+        catchQR: (base64Qr, asciiQR, attempts, urlCode) => {
+          this.handleQRCode(base64Qr, sessionName, attempts);
+        },
+        statusFind: (statusSession, session) => {
+          this.handleStatusChange(statusSession, session);
+        },
+        // Puppeteer options for both Lambda and local environments
         puppeteerOptions: {
           headless: this.config.headless !== false,
           executablePath: process.env.LAMBDA_MODE === 'true' ? '/usr/bin/chromium' : undefined,
@@ -176,47 +201,43 @@ class WhatsAppManager extends EventEmitter {
             '--disable-setuid-sandbox',
             '--disable-dev-shm-usage',
             '--disable-gpu',
-            '--memory-pressure-off',
-            '--max_old_space_size=512'
-          ] : []
-        },
-        // Custom QR handler
-        catchQR: (base64Qr, asciiQR, attempts, urlCode) => {
-          this.handleQRCode(user, base64Qr, sessionName, attempts);
-        },
-        statusFind: (statusSession, session) => {
-          this.handleStatusChange(user, statusSession, session);
-        },
-        // Additional options for persistent sessions
-        puppeteerOptions: {
-          headless: this.config.headless !== false,
-          args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage',
-            '--disable-gpu',
-            '--no-first-run',
+            '--disable-software-rasterizer',
             '--disable-background-timer-throttling',
             '--disable-backgrounding-occluded-windows',
             '--disable-renderer-backgrounding',
             '--disable-features=TranslateUI',
+            '--disable-extensions',
+            '--disable-web-security',
+            '--disable-features=VizDisplayCompositor',
+            '--no-first-run',
+            '--no-zygote',
+            '--memory-pressure-off',
+            '--max_old_space_size=512',
             '--disable-ipc-flooding-protection'
+          ] : [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-accelerated-2d-canvas',
+            '--no-first-run',
+            '--no-zygote',
+            '--disable-gpu',
+            '--disable-background-timer-throttling',
+            '--disable-backgrounding-occluded-windows',
+            '--disable-renderer-backgrounding'
           ]
         }
       });
 
       if (client) {
-        this.clients.set(user.name, {
-          client: client,
-          user: user,
-          sessionName: sessionName,
-          isConnected: false
-        });
+        this.client = client;
+        this.sessionName = sessionName;
+        this.isConnected = false;
 
-        this.setupUserEventListeners(user, client);
+        this.setupEventListeners(client);
         
         // AGGRESSIVE: Monitor console output for connection status
-        this.setupConsoleMonitoring(user.name);
+        this.setupConsoleMonitoring();
         
         // Force check connection status after a delay using observer pattern
         setTimeout(async () => {
@@ -224,37 +245,37 @@ class WhatsAppManager extends EventEmitter {
             // First try the official method
             const isReady = await client.isConnected();
             if (isReady) {
-              this.updateConnectionState(user.name, true, 'timeout verification');
-              this.emit('client-ready', user.name);
+              this.updateConnectionState(true, 'timeout verification');
+              this.emit('client-ready');
               return;
             }
           } catch (error) {
-            this.logger.debug(`${user.name} - isConnected() error:`, error.message);
+            this.logger.debug(`Main client - isConnected() error:`, error.message);
           }
           
           // FALLBACK: If we have a client instance and it's been 3+ seconds, assume connected
           // This is because venom-bot often shows "Successfully connected!" but isConnected() fails
           if (client) {
-            this.updateConnectionState(user.name, true, 'aggressive fallback - client exists');
-            this.emit('client-ready', user.name);
-            this.logger.info(`🔥 ${user.name} - FORCED connection state (venom-bot quirk)`);
+            this.updateConnectionState(true, 'aggressive fallback - client exists');
+            this.emit('client-ready');
+            this.logger.info(`🔥 Main client - FORCED connection state (venom-bot quirk)`);
           }
         }, 4000); // 4 seconds to allow full initialization
         
-        this.logger.info(`✅ Client initialized for user: ${user.name}`);
+        this.logger.info(`✅ WhatsApp client initialized successfully`);
         return true;
       }
       
       return false;
     } catch (error) {
-      this.logger.error(`❌ Failed to initialize client for ${user.name}:`, error.message);
+      this.logger.error(`❌ Failed to initialize WhatsApp client:`, error.message);
       return false;
     }
   }
 
-  async handleQRCode(user, base64Qr, sessionName, attempts) {
+  async handleQRCode(base64Qr, sessionName, attempts) {
     try {
-      this.logger.info(`📱 QR Code generated for ${user.name} (attempt ${attempts})`);
+      this.logger.info(`📱 QR Code generated (attempt ${attempts})`);
       
       // Convert base64 to file
       const qrBuffer = Buffer.from(base64Qr.split(',')[1], 'base64');
@@ -266,13 +287,13 @@ class WhatsAppManager extends EventEmitter {
       await fs.writeFile(qrPath, qrBuffer);
 
       // Send QR via email if configured
-      if (user.email) {
-        const emailSent = await this.emailManager.sendQRCode(qrPath, user);
+      if (this.clientUser.email) {
+        const emailSent = await this.emailManager.sendQRCode(qrPath, this.clientUser);
         if (emailSent) {
-          this.logger.info(`📧 QR code sent to ${user.email} for user: ${user.name}`);
+          this.logger.info(`📧 QR code sent to ${this.clientUser.email}`);
         }
       } else {
-        this.logger.warn(`⚠️ No email configured for user: ${user.name}`);
+        this.logger.warn(`⚠️ No email configured for WhatsApp client`);
       }
 
       // Clean up QR file after a delay
@@ -285,15 +306,14 @@ class WhatsAppManager extends EventEmitter {
       }, 300000); // 5 minutes
 
     } catch (error) {
-      this.logger.error(`❌ Error handling QR code for ${user.name}:`, error.message);
+      this.logger.error(`❌ Error handling QR code:`, error.message);
     }
   }
 
-  async handleStatusChange(user, statusSession, session) {
-    const clientData = this.clients.get(user.name);
-    if (!clientData) return;
+  async handleStatusChange(statusSession, session) {
+    if (!this.client) return;
 
-    this.logger.info(`📱 ${user.name} - WhatsApp status: ${statusSession}`);
+    this.logger.info(`📱 WhatsApp status: ${statusSession}`);
     
     // List of statuses that indicate connection
     const connectedStatuses = [
@@ -313,17 +333,17 @@ class WhatsAppManager extends EventEmitter {
     
     if (isConnectedStatus) {
       // Use observer pattern to update connection state
-      this.updateConnectionState(user.name, true, `status: ${statusSession}`);
+      this.updateConnectionState(true, `status: ${statusSession}`);
       
       // Emit ready event for important statuses
       if (statusSession === 'Connected' || statusSession === 'Successfully connected!') {
-        this.emit('client-ready', user.name);
+        this.emit('client-ready');
       }
       
       // Upload session to S3 only for major connection events
       if (statusSession === 'Connected' || statusSession === 'successChat') {
-        const sessionPath = path.join(process.env.LAMBDA_MODE === 'true' ? '/tmp' : process.cwd(), 'tokens', clientData.sessionName);
-        await this.s3SessionManager.uploadSession(clientData.sessionName, sessionPath);
+        const sessionPath = path.join(process.env.LAMBDA_MODE === 'true' ? '/tmp' : process.cwd(), 'tokens', this.sessionName);
+        await this.s3SessionManager.uploadSession(this.sessionName, sessionPath);
       }
     }
     
@@ -336,16 +356,16 @@ class WhatsAppManager extends EventEmitter {
     if (isDisconnectedStatus) {
       // Don't mark as disconnected for temporary disconnections during sync
       if (!statusSession.includes('Disconnected by cell phone')) {
-        this.updateConnectionState(user.name, false, `status: ${statusSession}`);
+        this.updateConnectionState(false, `status: ${statusSession}`);
       }
     }
   }
 
-  setupUserEventListeners(user, client) {
+  setupEventListeners(client) {
     if (!client) return;
 
     client.onStateChange((state) => {
-      this.logger.info(`${user.name} - WhatsApp state changed: ${state}`);
+      this.logger.info(`WhatsApp state changed: ${state}`);
       
       // More comprehensive connection detection
       const connectedStates = [
@@ -356,59 +376,55 @@ class WhatsAppManager extends EventEmitter {
       const isConnected = connectedStates.includes(state);
       
       if (isConnected) {
-        this.updateConnectionState(user.name, true, `state: ${state}`);
-        this.emit('client-ready', user.name);
+        this.updateConnectionState(true, `state: ${state}`);
+        this.emit('client-ready');
       } else if (state === 'CONFLICT' || state === 'UNLAUNCHED') {
-        this.updateConnectionState(user.name, false, `state: ${state}`);
+        this.updateConnectionState(false, `state: ${state}`);
       }
     });
 
     client.onMessage((message) => {
       // If we can receive messages, we're definitely connected
-      const clientData = this.clients.get(user.name);
-      if (clientData && !clientData.isConnected) {
-        this.updateConnectionState(user.name, true, 'received message');
-        this.emit('client-ready', user.name);
+      if (!this.isConnected) {
+        this.updateConnectionState(true, 'received message');
+        this.emit('client-ready');
       }
       
       if (this.config.logIncomingMessages) {
-        this.logger.info(`${user.name} - Incoming WhatsApp message from ${message.from}: ${message.body}`);
+        this.logger.info(`Incoming WhatsApp message from ${message.from}: ${message.body}`);
       }
     });
 
     client.onAck((ackEvent) => {
       // If we can send messages (get acks), we're connected
-      const clientData = this.clients.get(user.name);
-      if (clientData && !clientData.isConnected) {
-        this.updateConnectionState(user.name, true, 'message acknowledged');
-        this.emit('client-ready', user.name);
+      if (!this.isConnected) {
+        this.updateConnectionState(true, 'message acknowledged');
+        this.emit('client-ready');
       }
       
       if (this.config.logMessageStatus) {
-        this.logger.debug(`${user.name} - Message status: ${ackEvent.id} - ${ackEvent.ack}`);
+        this.logger.debug(`Message status: ${ackEvent.id} - ${ackEvent.ack}`);
       }
     });
   }
 
-  async sendMessage(phoneNumber, message, userName = null) {
+  async sendMessage(phoneNumber, message) {
     try {
-      // Get a connected client (specific user or first available)
-      const clientData = this.getAvailableClient(userName);
-      if (!clientData) {
-        this.logger.error('❌ No WhatsApp clients connected. Cannot send message.');
+      if (!this.client || !this.isConnected) {
+        this.logger.error('❌ WhatsApp client not connected. Cannot send message.');
         return false;
       }
 
       // Format phone number (ensure it has country code)
       const formattedNumber = this.formatPhoneNumber(phoneNumber);
       
-      const result = await clientData.client.sendText(formattedNumber, message);
+      const result = await this.client.sendText(formattedNumber, message);
       
       if (result) {
-        this.logger.info(`✅ Message sent via ${clientData.user.name} to ${formattedNumber}`);
+        this.logger.info(`✅ Message sent to ${formattedNumber}`);
         return true;
       } else {
-        this.logger.error(`❌ Failed to send message via ${clientData.user.name} to ${formattedNumber}`);
+        this.logger.error(`❌ Failed to send message to ${formattedNumber}`);
         return false;
       }
     } catch (error) {
@@ -423,37 +439,29 @@ class WhatsAppManager extends EventEmitter {
         recipients = [recipients];
       }
 
-      const connectedClients = Array.from(this.clients.values()).filter(c => c.isConnected);
-      if (connectedClients.length === 0) {
-        this.logger.error('❌ No WhatsApp clients connected');
+      if (!this.client || !this.isConnected) {
+        this.logger.error('❌ WhatsApp client not connected');
         return { success: 0, failed: recipients.length, results: [] };
       }
 
       let results = { success: 0, failed: 0, results: [] };
       
-      // Distribute messages across available clients
-      for (let i = 0; i < recipients.length; i++) {
-        const clientData = connectedClients[i % connectedClients.length];
-        const recipient = recipients[i];
-        
+      // Send messages to all recipients
+      for (const recipient of recipients) {
         try {
-          const formattedNumber = this.formatPhoneNumber(recipient);
-          const result = await clientData.client.sendText(formattedNumber, message);
+          const success = await this.sendMessage(recipient, message);
           
-          if (result) {
+          if (success) {
             results.success++;
             results.results.push({
               recipient: recipient,
-              status: 'sent',
-              client: clientData.user.name
+              status: 'sent'
             });
-            this.logger.info(`✅ Message sent via ${clientData.user.name} to ${recipient}`);
           } else {
             results.failed++;
             results.results.push({
               recipient: recipient,
               status: 'failed',
-              client: clientData.user.name,
               error: 'Send failed'
             });
           }
@@ -466,10 +474,9 @@ class WhatsAppManager extends EventEmitter {
           results.results.push({
             recipient: recipient,
             status: 'error',
-            client: clientData.user.name,
             error: error.message
           });
-          this.logger.error(`❌ Error sending to ${recipient} via ${clientData.user.name}:`, error.message);
+          this.logger.error(`❌ Error sending to ${recipient}:`, error.message);
         }
       }
 
@@ -482,31 +489,8 @@ class WhatsAppManager extends EventEmitter {
     }
   }
 
-  getAvailableClient(userName = null) {
-    this.logger.debug(`🔍 Looking for available client (userName: ${userName || 'any'})`);
-    
-    // Debug all clients status
-    for (const [name, clientData] of this.clients.entries()) {
-      this.logger.debug(`Client ${name}: isConnected=${clientData.isConnected}, hasClient=${!!clientData.client}`);
-    }
-    
-    if (userName) {
-      const clientData = this.clients.get(userName);
-      const available = (clientData && clientData.isConnected) ? clientData : null;
-      this.logger.debug(`Specific client ${userName}: ${available ? 'available' : 'not available'}`);
-      return available;
-    }
-    
-    // Return first connected client
-    for (const [name, clientData] of this.clients.entries()) {
-      if (clientData.isConnected) {
-        this.logger.debug(`Found available client: ${name}`);
-        return clientData;
-      }
-    }
-    
-    this.logger.debug(`No available clients found`);
-    return null;
+  isClientAvailable() {
+    return this.client && this.isConnected;
   }
 
   async sendNotificationsSummary(notificationsData) {
@@ -521,17 +505,17 @@ class WhatsAppManager extends EventEmitter {
         return false;
       }
 
-      // Filter only OPEN notifications
-      const openNotifications = notificationsData.filter(notification => 
-        notification.estado === 'ABIERTA'
+      // Filter only CLOSED notifications
+      const closedNotifications = notificationsData.filter(notification => 
+        notification.estado === 'CERRADA'
       );
 
-      if (openNotifications.length === 0) {
-        this.logger.info('📱 No open notifications found - WhatsApp message not sent');
+      if (closedNotifications.length === 0) {
+        this.logger.info('📱 No closed notifications found - WhatsApp message not sent');
         return false;
       }
 
-      const message = this.formatNotificationsMessage(openNotifications);
+      const message = this.formatNotificationsMessage(closedNotifications);
       
       // Send to all configured notification recipients
       const recipients = this.getAllNotificationRecipients();
@@ -543,7 +527,7 @@ class WhatsAppManager extends EventEmitter {
       const results = await this.sendMessageToAll(recipients, message);
       
       if (results.success > 0) {
-        this.logger.info(`📱 Notifications summary sent to ${results.success}/${recipients.length} recipients (${openNotifications.length} open records)`);
+        this.logger.info(`📱 Notifications summary sent to ${results.success}/${recipients.length} recipients (${closedNotifications.length} closed records)`);
         return true;
       } else {
         this.logger.error(`❌ Failed to send notifications to any recipients`);
@@ -563,10 +547,10 @@ class WhatsAppManager extends EventEmitter {
       recipients.push(this.config.notificationPhone);
     }
     
-    // Add user phones that want notifications
-    this.users.forEach(user => {
-      if (user.receiveNotifications && user.phone) {
-        recipients.push(user.phone);
+    // Add all configured notification recipients
+    this.notificationRecipients.forEach(recipient => {
+      if (recipient.phone && recipient.receiveNotifications !== false) {
+        recipients.push(recipient.phone);
       }
     });
     
@@ -588,8 +572,8 @@ class WhatsAppManager extends EventEmitter {
     const summary = `📊 *Resumen:* ${notificationsData.length} notificación(es) encontrada(s)\n\n`;
     
     let details = '';
-    notificationsData.slice(0, 30).forEach((notification, index) => { // Limit to 10 notifications
-      const status = notification.estado === 'ABIERTA' ? '🟢' : '🔴';
+    notificationsData.slice(0, 30).forEach((notification, index) => { // Limit to 30 notifications
+      const status = notification.estado === 'CERRADA' ? '🔴' : '🟢';
       details += `${status} *${index + 1}.* ${notification.numeroNotificacion}\n`;
       details += `📄 Exp: ${notification.numeroExpediente}\n`;
       details += `📋 ${notification.sumilla.substring(0, 50)}${notification.sumilla.length > 50 ? '...' : ''}\n`;
@@ -626,7 +610,7 @@ class WhatsAppManager extends EventEmitter {
         return false;
       }
 
-      const testMessage = `🧪 *Test Message*\n\nWhatsApp multi-user system is working!\n\n📱 Connected clients: ${this.getConnectedCount()}/${this.users.length}\n\n📅 ${new Date().toLocaleString('es-ES', { timeZone: 'America/Lima' })}\n\n🤖 _SINOE Notification System_`;
+      const testMessage = `🧪 *Test Message*\n\nWhatsApp single client system is working!\n\n📱 Client status: ${this.isConnected ? 'Connected' : 'Disconnected'}\n\n📅 ${new Date().toLocaleString('es-ES', { timeZone: 'America/Lima' })}\n\n🤖 _SINOE Notification System_`;
       
       return await this.sendMessage(this.config.testPhone, testMessage);
     } catch (error) {
@@ -636,12 +620,12 @@ class WhatsAppManager extends EventEmitter {
   }
 
   getConnectedCount() {
-    return Array.from(this.clients.values()).filter(c => c.isConnected).length;
+    return this.isConnected ? 1 : 0;
   }
 
   async close() {
     try {
-      this.logger.info('🧹 Closing all WhatsApp connections...');
+      this.logger.info('🧹 Closing WhatsApp connection...');
       
       // Clear verification interval
       if (this.verificationInterval) {
@@ -650,29 +634,27 @@ class WhatsAppManager extends EventEmitter {
         this.logger.info('⏹️ Stopped periodic verification');
       }
       
-      const closePromises = Array.from(this.clients.values()).map(async (clientData) => {
+      if (this.client) {
         try {
-          if (clientData.client) {
-            await clientData.client.close();
-            this.logger.info(`📱 ${clientData.user.name} - WhatsApp connection closed`);
-            
-            // Upload final session to S3
-            const sessionPath = path.join(process.env.LAMBDA_MODE === 'true' ? '/tmp' : process.cwd(), 'tokens', clientData.sessionName);
-            await this.s3SessionManager.uploadSession(clientData.sessionName, sessionPath);
-          }
+          await this.client.close();
+          this.logger.info(`📱 WhatsApp connection closed`);
+          
+          // Upload final session to S3
+          const sessionPath = path.join(process.env.LAMBDA_MODE === 'true' ? '/tmp' : process.cwd(), 'tokens', this.sessionName);
+          await this.s3SessionManager.uploadSession(this.sessionName, sessionPath);
         } catch (error) {
-          this.logger.error(`❌ Error closing connection for ${clientData.user.name}:`, error.message);
+          this.logger.error(`❌ Error closing WhatsApp connection:`, error.message);
         }
-      });
-
-      await Promise.allSettled(closePromises);
-      this.clients.clear();
+      }
+      
+      this.client = null;
+      this.isConnected = false;
       
       // Close email and S3 services
       await this.emailManager.close();
       
       this.isInitialized = false;
-      this.logger.info('✅ All WhatsApp connections closed');
+      this.logger.info('✅ WhatsApp connection closed');
     } catch (error) {
       this.logger.error('❌ Error closing WhatsApp system:', error.message);
     }
@@ -685,7 +667,8 @@ class WhatsAppManager extends EventEmitter {
     if (newLogger) {
       this.logger = newLogger;
     }
-    this.users = this.config.users || [];
+    this.clientUser = this.parseClientUser();
+    this.notificationRecipients = this.parseRecipients();
     
     // Update sub-managers with new config
     if (this.emailManager) {
@@ -703,7 +686,7 @@ class WhatsAppManager extends EventEmitter {
     WhatsAppManager.instance = null;
   }
 
-  setupConsoleMonitoring(userName) {
+  setupConsoleMonitoring() {
     // Store original console methods
     const originalConsoleLog = console.log;
     const originalConsoleInfo = console.info;
@@ -727,26 +710,26 @@ class WhatsAppManager extends EventEmitter {
     
     // Console interceptor
     const interceptConsole = (originalMethod, level) => {
-      return function(...args) {
+      return (...args) => {
         const message = args.join(' ');
         
         // Check for connection patterns
         if (connectionPatterns.some(pattern => pattern.test(message))) {
-          // Check if message relates to this user's session
-          if (message.includes(userName) || message.includes(`sinoe-${userName}`)) {
+          // Check if message relates to our session
+          if (message.includes(this.sessionName) || message.includes('sinoe-main')) {
             setTimeout(() => {
-              this.logger.info(`🎯 Console Monitor: Detected connection for ${userName}`);
-              this.updateConnectionState(userName, true, 'console-detected');
+              this.logger.info(`🎯 Console Monitor: Detected connection`);
+              this.updateConnectionState(true, 'console-detected');
             }, 500);
           }
         }
         
         // Check for disconnection patterns
         if (disconnectionPatterns.some(pattern => pattern.test(message))) {
-          if (message.includes(userName) || message.includes(`sinoe-${userName}`)) {
+          if (message.includes(this.sessionName) || message.includes('sinoe-main')) {
             setTimeout(() => {
-              this.logger.warn(`🎯 Console Monitor: Detected disconnection for ${userName}`);
-              this.updateConnectionState(userName, false, 'console-detected');
+              this.logger.warn(`🎯 Console Monitor: Detected disconnection`);
+              this.updateConnectionState(false, 'console-detected');
             }, 500);
           }
         }
@@ -769,55 +752,39 @@ class WhatsAppManager extends EventEmitter {
       console.info.__originalMethod = originalConsoleInfo;
     }
     
-    this.logger.info(`🎯 Console monitoring setup for ${userName}`);
+    this.logger.info(`🎯 Console monitoring setup for main client`);
   }
 
   setupObservers() {
     // Listen for connection state changes
-    this.on('client-connected', (userName) => {
-      const clientData = this.clients.get(userName);
-      if (clientData) {
-        clientData.isConnected = true;
-        this.connectionStates.set(userName, 'connected');
-        this.logger.info(`🎯 Observer: ${userName} marked as CONNECTED`);
-      }
+    this.on('client-connected', () => {
+      this.isConnected = true;
+      this.logger.info(`🎯 Observer: Client marked as CONNECTED`);
     });
 
-    this.on('client-disconnected', (userName) => {
-      const clientData = this.clients.get(userName);
-      if (clientData) {
-        clientData.isConnected = false;
-        this.connectionStates.set(userName, 'disconnected');
-        this.logger.info(`🎯 Observer: ${userName} marked as DISCONNECTED`);
-      }
+    this.on('client-disconnected', () => {
+      this.isConnected = false;
+      this.logger.info(`🎯 Observer: Client marked as DISCONNECTED`);
     });
 
-    this.on('client-ready', (userName) => {
-      const clientData = this.clients.get(userName);
-      if (clientData) {
-        clientData.isConnected = true;
-        this.connectionStates.set(userName, 'ready');
-        this.logger.info(`🎯 Observer: ${userName} is READY for messaging`);
-      }
+    this.on('client-ready', () => {
+      this.isConnected = true;
+      this.logger.info(`🎯 Observer: Client is READY for messaging`);
     });
   }
 
   // Force update connection state
-  updateConnectionState(userName, isConnected, reason = 'manual') {
-    const clientData = this.clients.get(userName);
-    if (clientData) {
-      const oldState = clientData.isConnected;
-      clientData.isConnected = isConnected;
-      this.connectionStates.set(userName, isConnected ? 'connected' : 'disconnected');
-      
-      // Only log if state actually changed
-      if (oldState !== isConnected) {
-        this.logger.info(`🔄 State change: ${userName} = ${isConnected ? 'CONNECTED' : 'DISCONNECTED'} (${reason})`);
-      }
-      
-      // Emit event
-      this.emit(isConnected ? 'client-connected' : 'client-disconnected', userName);
+  updateConnectionState(isConnected, reason = 'manual') {
+    const oldState = this.isConnected;
+    this.isConnected = isConnected;
+    
+    // Only log if state actually changed
+    if (oldState !== isConnected) {
+      this.logger.info(`🔄 State change: Client = ${isConnected ? 'CONNECTED' : 'DISCONNECTED'} (${reason})`);
     }
+    
+    // Emit event
+    this.emit(isConnected ? 'client-connected' : 'client-disconnected');
   }
 
   // Start periodic verification of connection states
@@ -845,54 +812,45 @@ class WhatsAppManager extends EventEmitter {
 
   // Aggressive connection state verification
   async verifyConnectionStates() {
-    for (const [userName, clientData] of this.clients.entries()) {
-      if (!clientData.client) continue;
-      
-      try {
-        // Try to get connection state from venom-bot
-        const hostDevice = await clientData.client.getHostDevice();
-        if (hostDevice && hostDevice.connected) {
-          if (!clientData.isConnected) {
-            this.logger.info(`🔍 Verification: ${userName} is actually CONNECTED (hostDevice check)`);
-            this.updateConnectionState(userName, true, 'verification-hostDevice');
-          }
+    if (!this.client) return;
+    
+    try {
+      // Try to get connection state from venom-bot
+      const hostDevice = await this.client.getHostDevice();
+      if (hostDevice && hostDevice.connected) {
+        if (!this.isConnected) {
+          this.logger.info(`🔍 Verification: Client is actually CONNECTED (hostDevice check)`);
+          this.updateConnectionState(true, 'verification-hostDevice');
         }
-      } catch (error) {
-        // Ignore errors, this is just verification
       }
-      
-      try {
-        // Alternative: Check if we can get WhatsApp Web info
-        const isConnected = await clientData.client.isConnected();
-        if (isConnected !== clientData.isConnected) {
-          this.logger.info(`🔍 Verification: ${userName} connection state mismatch - updating to ${isConnected}`);
-          this.updateConnectionState(userName, isConnected, 'verification-isConnected');
-        }
-      } catch (error) {
-        // If client methods fail, it's likely disconnected
-        if (clientData.isConnected) {
-          this.logger.warn(`🔍 Verification: ${userName} appears disconnected (client error)`);
-          this.updateConnectionState(userName, false, 'verification-error');
-        }
+    } catch (error) {
+      // Ignore errors, this is just verification
+    }
+    
+    try {
+      // Alternative: Check if we can get WhatsApp Web info
+      const isConnectedCheck = await this.client.isConnected();
+      if (isConnectedCheck !== this.isConnected) {
+        this.logger.info(`🔍 Verification: Client connection state mismatch - updating to ${isConnectedCheck}`);
+        this.updateConnectionState(isConnectedCheck, 'verification-isConnected');
+      }
+    } catch (error) {
+      // If client methods fail, it's likely disconnected
+      if (this.isConnected) {
+        this.logger.warn(`🔍 Verification: Client appears disconnected (client error)`);
+        this.updateConnectionState(false, 'verification-error');
       }
     }
   }
 
   getStatus() {
-    const clientStatuses = Array.from(this.clients.entries()).map(([name, clientData]) => ({
-      name: name,
-      connected: clientData.isConnected,
-      sessionName: clientData.sessionName,
-      phone: clientData.user.phone,
-      email: clientData.user.email
-    }));
-
     return {
       enabled: this.config.enabled,
       initialized: this.isInitialized,
-      totalClients: this.users.length,
-      connectedClients: this.getConnectedCount(),
-      clients: clientStatuses,
+      connected: this.isConnected,
+      sessionName: this.sessionName,
+      clientUser: this.clientUser,
+      notificationRecipients: this.notificationRecipients,
       email: this.emailManager.getStatus(),
       s3: this.s3SessionManager.getStatus()
     };

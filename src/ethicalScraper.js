@@ -261,13 +261,13 @@ class EthicalScraper {
         return false;
       }
 
-      // Filter only OPEN notifications (same logic as WhatsApp)
-      const openNotifications = notificationsData.filter(notification => 
-        notification.estado === 'ABIERTA'
+      // Filter only CLOSED notifications (same logic as WhatsApp)
+      const closedNotifications = notificationsData.filter(notification => 
+        notification.estado === 'CERRADA'
       );
 
-      if (openNotifications.length === 0) {
-        this.logger.info('📧 No open notifications found - Email not sent');
+      if (closedNotifications.length === 0) {
+        this.logger.info('📧 No closed notifications found - Email not sent');
         return false;
       }
 
@@ -280,27 +280,65 @@ class EthicalScraper {
       const emailManager = this.whatsappManager.emailManager;
 
       // Format email content
-      const subject = `🏛️ SINOE - ${openNotifications.length} Notificación(es) Electrónica(s) Pendiente(s)`;
-      const emailContent = this.formatEmailNotifications(openNotifications);
+      const subject = `🏛️ SINOE - ${closedNotifications.length} Notificación(es) Electrónica(s) Cerrada(s)`;
+      const emailContent = this.formatEmailNotifications(closedNotifications);
 
-      // Send email to configured recipient
-      const recipient = this.config.email.clientEmail || this.config.email.emailClient;
-      if (!recipient) {
-        this.logger.error('❌ No email recipient configured');
+      // Get all notification recipients from WhatsApp config (same as WhatsApp recipients)
+      const allRecipients = this.whatsappManager.getAllNotificationRecipients();
+      const emailRecipients = [];
+      
+      // Get email addresses from WHATSAPP_RECIPIENTS
+      this.whatsappManager.notificationRecipients.forEach(recipient => {
+        if (recipient.email && recipient.receiveNotifications !== false) {
+          emailRecipients.push(recipient.email);
+        }
+      });
+
+      // Fallback to config email if no recipients found
+      if (emailRecipients.length === 0) {
+        const fallbackRecipient = this.config.email.clientEmail || this.config.email.emailClient;
+        if (fallbackRecipient) {
+          emailRecipients.push(fallbackRecipient);
+        }
+      }
+
+      if (emailRecipients.length === 0) {
+        this.logger.error('❌ No email recipients configured');
         return false;
       }
 
-      const success = await emailManager.sendEmail({
-        to: recipient,
-        subject: subject,
-        html: emailContent
-      });
+      // Send emails to all recipients
+      let successCount = 0;
+      let failCount = 0;
 
-      if (success) {
-        this.logger.info(`📧 Email notifications sent successfully to ${recipient} (${openNotifications.length} open records)`);
+      for (const recipient of emailRecipients) {
+        try {
+          const success = await emailManager.sendEmail({
+            to: recipient,
+            subject: subject,
+            html: emailContent
+          });
+
+          if (success) {
+            successCount++;
+          } else {
+            failCount++;
+          }
+          
+          // Small delay between emails
+          await new Promise(resolve => setTimeout(resolve, 1000));
+          
+        } catch (error) {
+          failCount++;
+          this.logger.error(`❌ Failed to send email to ${recipient}:`, error.message);
+        }
+      }
+
+      if (successCount > 0) {
+        this.logger.info(`📧 Email notifications sent to ${successCount}/${emailRecipients.length} recipients (${closedNotifications.length} closed records)`);
         return true;
       } else {
-        this.logger.error('❌ Failed to send email notifications');
+        this.logger.error(`❌ Failed to send email notifications to any recipients (${failCount} failed)`);
         return false;
       }
 

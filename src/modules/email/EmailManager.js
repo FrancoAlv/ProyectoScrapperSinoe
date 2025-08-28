@@ -167,15 +167,40 @@ class EmailManager {
     `;
   }
 
-  async sendTestEmail(recipient) {
+  async sendEmail({ to, subject, html, text = null }) {
     try {
       if (!this.transporter) {
         this.logger.error('❌ Email service not initialized');
         return false;
       }
 
+      if (!to || !subject || (!html && !text)) {
+        this.logger.error('❌ Missing required email parameters (to, subject, html/text)');
+        return false;
+      }
+
       const mailOptions = {
         from: this.config.emailUser || this.config.userEmail,
+        to: to,
+        subject: subject,
+        html: html,
+        text: text
+      };
+
+      const info = await this.transporter.sendMail(mailOptions);
+      this.logger.info(`✅ Email sent successfully to ${to}`);
+      this.logger.debug('Email info:', info.messageId);
+      
+      return true;
+    } catch (error) {
+      this.logger.error(`❌ Failed to send email to ${to}:`, error.message);
+      return false;
+    }
+  }
+
+  async sendTestEmail(recipient) {
+    try {
+      return await this.sendEmail({
         to: recipient,
         subject: '🧪 SINOE - Test Email',
         html: `
@@ -187,11 +212,7 @@ class EmailManager {
             <p>🤖 <em>Sistema de notificaciones SINOE</em></p>
           </div>
         `
-      };
-
-      const info = await this.transporter.sendMail(mailOptions);
-      this.logger.info(`✅ Test email sent successfully to ${recipient}`);
-      return true;
+      });
     } catch (error) {
       this.logger.error(`❌ Failed to send test email:`, error.message);
       return false;

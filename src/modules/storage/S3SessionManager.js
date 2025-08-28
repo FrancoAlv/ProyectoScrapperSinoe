@@ -57,8 +57,8 @@ class S3SessionManager {
         return false;
       }
 
-      // Create tar.gz archive of session directory
-      const archiveName = `${sessionName}-${Date.now()}.tar.gz`;
+      // Create tar.gz archive of session directory  
+      const archiveName = `${sessionName}.tar.gz`;
       const archivePath = path.join(process.env.LAMBDA_MODE === 'true' ? '/tmp' : process.cwd(), 'temp', archiveName);
       
       // Ensure temp directory exists
@@ -73,7 +73,7 @@ class S3SessionManager {
 
       // Upload to S3
       const fileBuffer = await fs.readFile(archivePath);
-      const s3Key = `sessions/${sessionName}/${archiveName}`;
+      const s3Key = `sessions/${sessionName}.tar.gz`;
       
       const uploadParams = {
         Bucket: this.bucketName,
@@ -108,30 +108,29 @@ class S3SessionManager {
         return false;
       }
 
-      // List available sessions for this name
-      const listParams = {
-        Bucket: this.bucketName,
-        Prefix: `sessions/${sessionName}/`
-      };
-
-      const objects = await this.s3.listObjectsV2(listParams).promise();
+      // Try to get the specific session file
+      const s3Key = `sessions/${sessionName}.tar.gz`;
       
-      if (!objects.Contents || objects.Contents.length === 0) {
-        this.logger.info(`📭 No session found in S3 for: ${sessionName}`);
-        return false;
+      this.logger.info(`📥 Downloading session: ${s3Key}`);
+      
+      // Check if session exists
+      try {
+        await this.s3.headObject({ 
+          Bucket: this.bucketName, 
+          Key: s3Key 
+        }).promise();
+      } catch (error) {
+        if (error.statusCode === 404) {
+          this.logger.info(`📭 No session found in S3 for: ${sessionName}`);
+          return false;
+        }
+        throw error;
       }
-
-      // Get the most recent session (by modification time)
-      const latestSession = objects.Contents.sort((a, b) => 
-        new Date(b.LastModified) - new Date(a.LastModified)
-      )[0];
-
-      this.logger.info(`📥 Downloading session: ${latestSession.Key}`);
 
       // Download from S3
       const downloadParams = {
         Bucket: this.bucketName,
-        Key: latestSession.Key
+        Key: s3Key
       };
 
       const data = await this.s3.getObject(downloadParams).promise();
@@ -223,30 +222,31 @@ class S3SessionManager {
         return false;
       }
 
-      // List all objects for this session
-      const listParams = {
-        Bucket: this.bucketName,
-        Prefix: `sessions/${sessionName}/`
-      };
-
-      const objects = await this.s3.listObjectsV2(listParams).promise();
+      // Delete the specific session file
+      const s3Key = `sessions/${sessionName}.tar.gz`;
       
-      if (!objects.Contents || objects.Contents.length === 0) {
-        this.logger.info(`📭 No session found to delete: ${sessionName}`);
-        return true;
+      try {
+        await this.s3.headObject({ 
+          Bucket: this.bucketName, 
+          Key: s3Key 
+        }).promise();
+      } catch (error) {
+        if (error.statusCode === 404) {
+          this.logger.info(`📭 No session found to delete: ${sessionName}`);
+          return true;
+        }
+        throw error;
       }
 
-      // Delete all objects for this session
+      // Delete the session file
       const deleteParams = {
         Bucket: this.bucketName,
-        Delete: {
-          Objects: objects.Contents.map(obj => ({ Key: obj.Key }))
-        }
+        Key: s3Key
       };
 
-      const result = await this.s3.deleteObjects(deleteParams).promise();
+      await this.s3.deleteObject(deleteParams).promise();
       
-      this.logger.info(`🗑️ Deleted ${result.Deleted.length} files for session: ${sessionName}`);
+      this.logger.info(`🗑️ Deleted session file: ${sessionName}`);
       return true;
       
     } catch (error) {

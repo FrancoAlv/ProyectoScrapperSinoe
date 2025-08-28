@@ -13,7 +13,7 @@ class Config {
       outputBucket: process.env.S3_BUCKET || null,
       logLevel: process.env.LOG_LEVEL || 'info',
 
-      // WhatsApp configuration - Multi-user support
+      // WhatsApp configuration - Single client with multiple recipients
       whatsapp: {
         enabled: process.env.WHATSAPP_ENABLED === 'true',
         sessionPrefix: process.env.WHATSAPP_SESSION_PREFIX || 'sinoe',
@@ -24,22 +24,38 @@ class Config {
         logMessageStatus: process.env.WHATSAPP_LOG_MESSAGE_STATUS === 'true',
         sendOnSuccess: process.env.WHATSAPP_SEND_ON_SUCCESS === 'true',
         sendOnError: process.env.WHATSAPP_SEND_ON_ERROR === 'true',
-        // Multi-user configuration
-        users: (() => {
+        // Single client configuration (who connects to WhatsApp)
+        clientUser: (() => {
           try {
-            return process.env.WHATSAPP_USERS ? JSON.parse(process.env.WHATSAPP_USERS) : [
+            return process.env.WHATSAPP_CLIENT_USER ? JSON.parse(process.env.WHATSAPP_CLIENT_USER) : {
+              name: 'main',
+              phone: process.env.WHATSAPP_NOTIFICATION_PHONE || '',
+              email: process.env.EMAILCLIENT || ''
+            };
+          } catch {
+            return {
+              name: 'main',
+              phone: process.env.WHATSAPP_NOTIFICATION_PHONE || '',
+              email: process.env.EMAILCLIENT || ''
+            };
+          }
+        })(),
+        // Multiple notification recipients
+        recipients: (() => {
+          try {
+            return process.env.WHATSAPP_RECIPIENTS ? JSON.parse(process.env.WHATSAPP_RECIPIENTS) : [
               {
-                name: 'user1',
-                phone: process.env.WHATSAPP_USER1_PHONE || '',
-                email: process.env.WHATSAPP_USER1_EMAIL || '',
-                receiveNotifications: process.env.WHATSAPP_USER1_NOTIFICATIONS === 'true'
+                name: 'Franco',
+                phone: process.env.WHATSAPP_NOTIFICATION_PHONE || '',
+                email: process.env.EMAILCLIENT || '',
+                receiveNotifications: true
               }
             ];
           } catch {
             return [{
-              name: 'user1',
-              phone: process.env.WHATSAPP_USER1_PHONE || '',
-              email: process.env.WHATSAPP_USER1_EMAIL || '',
+              name: 'Franco',
+              phone: process.env.WHATSAPP_NOTIFICATION_PHONE || '',
+              email: process.env.EMAILCLIENT || '',
               receiveNotifications: true
             }];
           }
