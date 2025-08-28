@@ -59,7 +59,7 @@ class S3SessionManager {
 
       // Create tar.gz archive of session directory
       const archiveName = `${sessionName}-${Date.now()}.tar.gz`;
-      const archivePath = path.join(process.cwd(), 'temp', archiveName);
+      const archivePath = path.join(process.env.LAMBDA_MODE === 'true' ? '/tmp' : process.cwd(), 'temp', archiveName);
       
       // Ensure temp directory exists
       await fs.mkdir(path.dirname(archivePath), { recursive: true });
@@ -137,7 +137,7 @@ class S3SessionManager {
       const data = await this.s3.getObject(downloadParams).promise();
       
       // Save to temporary file
-      const tempArchivePath = path.join(process.cwd(), 'temp', `download-${sessionName}.tar.gz`);
+      const tempArchivePath = path.join(process.env.LAMBDA_MODE === 'true' ? '/tmp' : process.cwd(), 'temp', `download-${sessionName}.tar.gz`);
       await fs.mkdir(path.dirname(tempArchivePath), { recursive: true });
       await fs.writeFile(tempArchivePath, data.Body);
 

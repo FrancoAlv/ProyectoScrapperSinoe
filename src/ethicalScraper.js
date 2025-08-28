@@ -173,7 +173,7 @@ class EthicalScraper {
       this.logger.info(`📱 Sending WhatsApp notifications for ${notificationsCount} records...`);
       
       const success = await this.whatsappManager.sendNotificationsSummary(this.extractedData.notifications);
-      
+      await new Promise(resolve => setTimeout(resolve, 2000)); // Short delay to ensure messages are sent
       if (success) {
         this.logger.info(`✅ WhatsApp notifications sent successfully (${notificationsCount} records)`);
         return true;

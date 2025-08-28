@@ -1,0 +1,30 @@
+version = 0.1
+
+[default.global.parameters]
+stack_name = "sinoe-scraper"
+region = "us-east-1"
+confirm_changeset = false
+capabilities = "CAPABILITY_IAM"
+disable_rollback = false
+image_repositories = []
+
+[default.build.parameters]
+cached = true
+parallel = true
+
+[default.deploy.parameters]
+confirm_changeset = true
+disable_rollback = false
+image_repositories = ["SinoeScraperFunction=058264329793.dkr.ecr.us-east-1.amazonaws.com/sinoescrapercfd29b20/sinoescraperfunction3fe807b1repo"]
+parameter_overrides = "SinoeUsername=\"154154\" WhatsAppPhone=\"51913052298\" EmailAddress=\"franco.caralv@gmail.com\""
+resolve_s3 = true
+s3_prefix = "sinoe-scraper"
+
+[default.sync.parameters]
+watch = true
+
+[default.local_start_api.parameters]
+warm_containers = "EAGER"
+
+[default.local_start_lambda.parameters]
+warm_containers = "EAGER"
