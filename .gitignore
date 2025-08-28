@@ -46,4 +46,5 @@ build/
 # Temporary files
 tmp/
 temp/
-./template.yamltemplate.yaml
+./template.yaml
+template.yaml
