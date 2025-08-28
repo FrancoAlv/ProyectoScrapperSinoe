@@ -22,8 +22,6 @@ class S3SessionManager {
 
       // Configure AWS
       AWS.config.update({
-        accessKeyId: this.config.accessKeyId,
-        secretAccessKey: this.config.secretAccessKey,
         region: this.config.region || 'us-east-1'
       });
 

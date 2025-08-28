@@ -118,7 +118,7 @@ class WhatsAppManager extends EventEmitter {
       this.logger.info(`🚀 Initializing WhatsApp for user: ${user.name}`);
       
       const sessionName = `${this.config.sessionPrefix || 'sinoe'}-${user.name}`;
-      const sessionPath = path.join(process.cwd(), 'tokens', sessionName);
+      const sessionPath = path.join(process.env.LAMBDA_MODE === 'true' ? '/tmp' : process.cwd(), 'tokens', sessionName);
 
       // Try to download session from S3 if available
       await this.s3SessionManager.downloadSession(sessionName, sessionPath);
@@ -131,7 +131,25 @@ class WhatsAppManager extends EventEmitter {
         useChrome: true,
         debug: false,
         logQR: false, // We'll handle QR manually
-        browserArgs: [
+        browserArgs: process.env.LAMBDA_MODE === 'true' ? [
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--disable-dev-shm-usage',
+          '--disable-gpu',
+          '--disable-software-rasterizer',
+          '--disable-background-timer-throttling',
+          '--disable-backgrounding-occluded-windows',
+          '--disable-renderer-backgrounding',
+          '--disable-features=TranslateUI',
+          '--disable-extensions',
+          '--disable-web-security',
+          '--disable-features=VizDisplayCompositor',
+          '--no-first-run',
+          '--no-zygote',
+          '--memory-pressure-off',
+          '--max_old_space_size=512',
+          '--disable-ipc-flooding-protection'
+        ] : [
           '--no-sandbox',
           '--disable-setuid-sandbox',
           '--disable-dev-shm-usage',
@@ -147,6 +165,21 @@ class WhatsAppManager extends EventEmitter {
         autoClose: 0, // NEVER auto close - sesiones permanentes
         disableSpins: true, // Disable loading spinners in headless
         createPathFileToken: true,
+        folderNameToken: process.env.LAMBDA_MODE === 'true' ? '/tmp/tokens' : './tokens',
+        // Lambda-specific Puppeteer options
+        puppeteerOptions: {
+          headless: this.config.headless !== false,
+          executablePath: process.env.LAMBDA_MODE === 'true' ? '/usr/bin/chromium' : undefined,
+          timeout: 60000,
+          args: process.env.LAMBDA_MODE === 'true' ? [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-gpu',
+            '--memory-pressure-off',
+            '--max_old_space_size=512'
+          ] : []
+        },
         // Custom QR handler
         catchQR: (base64Qr, asciiQR, attempts, urlCode) => {
           this.handleQRCode(user, base64Qr, sessionName, attempts);
@@ -225,7 +258,7 @@ class WhatsAppManager extends EventEmitter {
       
       // Convert base64 to file
       const qrBuffer = Buffer.from(base64Qr.split(',')[1], 'base64');
-      const qrPath = path.join(process.cwd(), 'temp', `qr-${sessionName}-${Date.now()}.png`);
+      const qrPath = path.join(process.env.LAMBDA_MODE === 'true' ? '/tmp' : process.cwd(), 'temp', `qr-${sessionName}-${Date.now()}.png`);
       
       // Ensure temp directory exists
       const fs = require('fs').promises;
@@ -289,7 +322,7 @@ class WhatsAppManager extends EventEmitter {
       
       // Upload session to S3 only for major connection events
       if (statusSession === 'Connected' || statusSession === 'successChat') {
-        const sessionPath = path.join(process.cwd(), 'tokens', clientData.sessionName);
+        const sessionPath = path.join(process.env.LAMBDA_MODE === 'true' ? '/tmp' : process.cwd(), 'tokens', clientData.sessionName);
         await this.s3SessionManager.uploadSession(clientData.sessionName, sessionPath);
       }
     }
@@ -624,7 +657,7 @@ class WhatsAppManager extends EventEmitter {
             this.logger.info(`📱 ${clientData.user.name} - WhatsApp connection closed`);
             
             // Upload final session to S3
-            const sessionPath = path.join(process.cwd(), 'tokens', clientData.sessionName);
+            const sessionPath = path.join(process.env.LAMBDA_MODE === 'true' ? '/tmp' : process.cwd(), 'tokens', clientData.sessionName);
             await this.s3SessionManager.uploadSession(clientData.sessionName, sessionPath);
           }
         } catch (error) {
