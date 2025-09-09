@@ -10,7 +10,8 @@
       "Bash(aws:*)",
       "Bash(set AWS_REGION=us-east-1)",
       "Bash(set SINOE_USERNAME=154154)",
-      "Bash(powershell:*)"
+      "Bash(powershell:*)",
+      "Bash(npm uninstall:*)"
     ],
     "deny": [],
     "ask": []

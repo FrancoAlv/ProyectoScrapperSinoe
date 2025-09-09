@@ -17,13 +17,53 @@ class EthicalScraper {
     this.logger = new Logger(this.config.logLevel);
     this.scraper = new WebScraper(this.config, this.logger);
     this.resultSaver = new ResultSaver(this.config, this.logger);
+    
+    // Debug WhatsApp manager creation
+    this.logger.info('🔧 Creating WhatsApp manager instance...');
     this.whatsappManager = WhatsAppManager.getInstance(this.config, this.logger);
+    this.logger.info(`✅ WhatsApp manager created. Enabled: ${this.config.whatsapp?.enabled}`);
+    
     this.dynamodbManager = new DynamoDBManager(this.config.dynamodb, this.logger);
     this.results = [];
     this.extractedData = null; // Store extracted notifications data
 
     // Store the singleton instance
     EthicalScraper.instance = this;
+  }
+
+  // Memory monitoring utility
+  logMemoryUsage(stage) {
+    try {
+      const used = process.memoryUsage();
+      const totalMB = Math.round(used.rss / 1024 / 1024);
+      const heapUsedMB = Math.round(used.heapUsed / 1024 / 1024);
+      const heapTotalMB = Math.round(used.heapTotal / 1024 / 1024);
+      const externalMB = Math.round(used.external / 1024 / 1024);
+      
+      // Get system memory if available (Lambda shows this in container)
+      let systemInfo = '';
+      if (process.env.AWS_LAMBDA_FUNCTION_MEMORY_SIZE) {
+        const lambdaMemoryMB = parseInt(process.env.AWS_LAMBDA_FUNCTION_MEMORY_SIZE);
+        const usagePercent = Math.round((totalMB / lambdaMemoryMB) * 100);
+        systemInfo = ` | Lambda: ${lambdaMemoryMB}MB | Usage: ${usagePercent}%`;
+      }
+      
+      this.logger.info(`🧠 Memory [${stage}]: RSS=${totalMB}MB | Heap=${heapUsedMB}/${heapTotalMB}MB | External=${externalMB}MB${systemInfo}`);
+      
+      // Warning if memory usage is high
+      if (process.env.AWS_LAMBDA_FUNCTION_MEMORY_SIZE) {
+        const lambdaMemoryMB = parseInt(process.env.AWS_LAMBDA_FUNCTION_MEMORY_SIZE);
+        const usagePercent = (totalMB / lambdaMemoryMB) * 100;
+        
+        if (usagePercent > 80) {
+          this.logger.warn(`⚠️ High memory usage: ${usagePercent.toFixed(1)}% of available ${lambdaMemoryMB}MB`);
+        } else if (usagePercent > 90) {
+          this.logger.error(`❌ Critical memory usage: ${usagePercent.toFixed(1)}% of available ${lambdaMemoryMB}MB`);
+        }
+      }
+    } catch (error) {
+      this.logger.debug(`Error logging memory usage: ${error.message}`);
+    }
   }
 
   // Static method to get the singleton instance
@@ -54,6 +94,8 @@ class EthicalScraper {
 
   async runJob() {
     const startTime = Date.now();
+    this.logMemoryUsage('START');
+    
     this.logger.info('🚀 Starting SINOE scraping job with WhatsApp notifications', {
       targetUrls: this.config.targetUrls.length,
       whatsappEnabled: this.config.whatsapp?.enabled || false
@@ -65,24 +107,7 @@ class EthicalScraper {
     }
 
     try {
-      // Initialize WhatsApp system first
-      if (this.config.whatsapp?.enabled) {
-        this.logger.info('🔧 Initializing WhatsApp system...');
-        const whatsappInitialized = await this.whatsappManager.initialize();
-        
-        if (whatsappInitialized) {
-          this.logger.info('✅ WhatsApp system initialized successfully');
-          
-          // Send test message if configured
-          if (this.config.whatsapp.testPhone) {
-            await this.whatsappManager.sendTestMessage();
-          }
-        } else {
-          this.logger.warn('⚠️ WhatsApp initialization failed, continuing without notifications');
-        }
-      }
-
-      // Initialize DynamoDB system
+      // Initialize DynamoDB system only (defer WhatsApp until after scraping)
       if (this.config.dynamodb?.enabled) {
         this.logger.info('🗄️ Initializing DynamoDB system...');
         const dynamodbInitialized = await this.dynamodbManager.initialize();
@@ -94,8 +119,11 @@ class EthicalScraper {
         }
       }
 
-      // Initialize web scraper
+      // Initialize web scraper (this will use most of the memory)
+      this.logger.info('🔧 Initializing web scraper (main browser)...');
+      this.logMemoryUsage('BEFORE_BROWSER');
       await this.scraper.initialize();
+      this.logMemoryUsage('AFTER_BROWSER');
 
       // Process each URL with delay between requests
       for (let i = 0; i < this.config.targetUrls.length; i++) {
@@ -119,16 +147,43 @@ class EthicalScraper {
         }
       }
 
-      // Save results
+      // Save results to file
+      this.logger.info('💾 Saving results to files...');
       await this.resultSaver.saveResults(this.results);
+      this.logger.info('✅ Results saved to files successfully');
       
       // Save to DynamoDB if we have extracted data
-      await this.saveToDynamoDB();
+      this.logger.info('💾 Attempting to save to DynamoDB...');
+      const dynamoSaved = await this.saveToDynamoDB();
+      this.logger.info(`✅ DynamoDB save completed: ${dynamoSaved}`);
+      
+      // Close web scraper to free memory before WhatsApp initialization
+      if (this.scraper) {
+        this.logger.info('🧹 Closing web scraper to free memory for WhatsApp...');
+        this.logMemoryUsage('BEFORE_CLOSE_BROWSER');
+        await this.scraper.close();
+        this.scraper = null; // Mark as closed
+        
+        // Force garbage collection if available
+        if (global.gc) {
+          global.gc();
+          this.logger.debug('🗑️ Forced garbage collection');
+        }
+        
+        // Wait a bit for cleanup
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        this.logMemoryUsage('AFTER_CLOSE_BROWSER');
+      }
+      
+      // Now initialize WhatsApp system (using the freed memory)
+      this.logger.info('🚀 About to initialize WhatsApp system after scraping...');
+      await this.initializeWhatsAppAfterScraping();
       
       // Send WhatsApp notifications if we have extracted data
       await this.sendNotifications();
       
       const duration = Date.now() - startTime;
+      this.logMemoryUsage('END');
       this.logger.info('✅ Scraping job completed successfully', { 
         duration: `${duration}ms`,
         totalResults: this.results.length,
@@ -144,6 +199,39 @@ class EthicalScraper {
       throw error; // Re-throw to maintain error handling behavior
     } finally {
       await this.cleanup();
+    }
+  }
+
+  async initializeWhatsAppAfterScraping() {
+    try {
+      this.logger.info('📋 Starting WhatsApp initialization method...');
+      
+      if (!this.config.whatsapp?.enabled) {
+        this.logger.warn('⚠️ WhatsApp is disabled in configuration - skipping initialization');
+        return false;
+      }
+
+      this.logger.info('🔧 WhatsApp enabled - proceeding with initialization...');
+      this.logger.info('🧠 Memory optimization: Using freed browser memory for WhatsApp');
+      this.logMemoryUsage('BEFORE_WHATSAPP');
+      
+      this.logger.info('⏳ Calling whatsappManager.initialize()...');
+      const whatsappInitialized = await this.whatsappManager.initialize();
+      this.logger.info(`🔍 WhatsApp initialization result: ${whatsappInitialized}`);
+      this.logMemoryUsage('AFTER_WHATSAPP');
+      
+      if (whatsappInitialized) {
+        this.logger.info('✅ WhatsApp system initialized successfully (memory optimized)');
+        return true;
+      } else {
+        this.logger.warn('⚠️ WhatsApp initialization failed, will fallback to email');
+        return false;
+      }
+      
+    } catch (error) {
+      this.logger.error('❌ Error initializing WhatsApp after scraping:', error.message);
+      this.logMemoryUsage('WHATSAPP_ERROR');
+      return false;
     }
   }
 
@@ -211,8 +299,8 @@ class EthicalScraper {
       }
 
       if (!this.extractedData || !this.extractedData.notifications) {
-        this.logger.info('📄 No notifications data to save to DynamoDB');
-        return false;
+        this.logger.info('📄 No notifications data to save to DynamoDB - continuing with WhatsApp initialization anyway');
+        return true; // Don't block WhatsApp initialization
       }
 
       const notificationsCount = this.extractedData.notifications.length;
@@ -261,15 +349,18 @@ class EthicalScraper {
         return false;
       }
 
-      // Filter only CLOSED notifications (same logic as WhatsApp)
+      // Email shows ALL notifications (both open and closed)
+      const allNotifications = notificationsData; // Show all notifications in email
+      
+      if (allNotifications.length === 0) {
+        this.logger.info('📧 No notifications found - Email not sent');
+        return false;
+      }
+      
+      // Separate closed notifications for count in subject
       const closedNotifications = notificationsData.filter(notification => 
         notification.estado === 'CERRADA'
       );
-
-      if (closedNotifications.length === 0) {
-        this.logger.info('📧 No closed notifications found - Email not sent');
-        return false;
-      }
 
       // Get EmailManager from WhatsAppManager (since it's already initialized there)
       if (!this.whatsappManager?.emailManager) {
@@ -279,9 +370,11 @@ class EthicalScraper {
 
       const emailManager = this.whatsappManager.emailManager;
 
-      // Format email content
-      const subject = `🏛️ SINOE - ${closedNotifications.length} Notificación(es) Electrónica(s) Cerrada(s)`;
-      const emailContent = this.formatEmailNotifications(closedNotifications);
+      // Format email content - show all notifications but highlight counts
+      const openCount = allNotifications.filter(n => n.estado !== 'CERRADA').length;
+      const closedCount = closedNotifications.length;
+      const subject = `🏛️ SINOE - ${allNotifications.length} Notificaciones: ${openCount} Abiertas, ${closedCount} Cerradas`;
+      const emailContent = this.formatEmailNotifications(allNotifications);
 
       // Get all notification recipients from WhatsApp config (same as WhatsApp recipients)
       const allRecipients = this.whatsappManager.getAllNotificationRecipients();
@@ -335,7 +428,7 @@ class EthicalScraper {
       }
 
       if (successCount > 0) {
-        this.logger.info(`📧 Email notifications sent to ${successCount}/${emailRecipients.length} recipients (${closedNotifications.length} closed records)`);
+        this.logger.info(`📧 Email notifications sent to ${successCount}/${emailRecipients.length} recipients (${allNotifications.length} total: ${openCount} abiertas, ${closedCount} cerradas)`);
         return true;
       } else {
         this.logger.error(`❌ Failed to send email notifications to any recipients (${failCount} failed)`);
@@ -358,11 +451,18 @@ class EthicalScraper {
       minute: '2-digit'
     });
 
+    const openCount = notificationsData.filter(n => n.estado !== 'CERRADA').length;
+    const closedCount = notificationsData.filter(n => n.estado === 'CERRADA').length;
+
     let html = `
     <div style="font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto;">
       <h2 style="color: #2c3e50; border-bottom: 2px solid #3498db;">🏛️ SINOE - Notificaciones Electrónicas</h2>
       <p><strong>📅 Fecha:</strong> ${timestamp}</p>
-      <p><strong>📊 Resumen:</strong> ${notificationsData.length} notificación(es) pendiente(s)</p>
+      <p><strong>📊 Resumen:</strong> ${notificationsData.length} notificación(es) encontrada(s)</p>
+      <p style="font-size: 16px;">
+        <span style="color: #27ae60;">🟢 <strong>${openCount} Abiertas</strong></span> | 
+        <span style="color: #e74c3c;">🔴 <strong>${closedCount} Cerradas</strong></span>
+      </p>
       
       <h3 style="color: #27ae60;">📋 Detalle de Notificaciones:</h3>
       <table style="width: 100%; border-collapse: collapse; margin-top: 20px;">
@@ -477,24 +577,29 @@ class EthicalScraper {
 
   async cleanup() {
     try {
-      this.logger.info('🧹 Performing cleanup...');
+      this.logger.info('🧹 Performing final cleanup...');
       
-      // Close web scraper
+      // Close web scraper (if not already closed for memory optimization)
       if (this.scraper) {
+        this.logger.debug('🧹 Closing web scraper...');
         await this.scraper.close();
+      } else {
+        this.logger.debug('🧹 Web scraper already closed (memory optimization)');
       }
       
       // Close WhatsApp connections and clear intervals
       if (this.whatsappManager) {
+        this.logger.debug('🧹 Closing WhatsApp manager...');
         await this.whatsappManager.close();
       }
 
       // Close DynamoDB connections
       if (this.dynamodbManager) {
+        this.logger.debug('🧹 Closing DynamoDB manager...');
         await this.dynamodbManager.close();
       }
       
-      this.logger.info('✅ Cleanup completed');
+      this.logger.info('✅ Final cleanup completed');
     } catch (error) {
       this.logger.error('❌ Error during cleanup:', error.message);
     }

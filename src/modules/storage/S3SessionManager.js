@@ -66,10 +66,17 @@ class S3SessionManager {
       
       this.logger.info(`📦 Creating session archive: ${archiveName}`);
       
-      // Create compressed archive
-      execSync(`tar -czf "${archivePath}" -C "${path.dirname(localSessionPath)}" "${path.basename(localSessionPath)}"`, {
+      // Create compressed archive (ignore file changes and removals during compression)
+      execSync(`tar --warning=no-file-changed --warning=no-file-removed -czf "${archivePath}" -C "${path.dirname(localSessionPath)}" "${path.basename(localSessionPath)}" 2>/dev/null || true`, {
         stdio: 'pipe'
       });
+
+      // Check if archive was created successfully
+      const archiveExists = await this.fileExists(archivePath);
+      if (!archiveExists) {
+        this.logger.warn(`⚠️ Session archive was not created: ${archivePath}`);
+        return false;
+      }
 
       // Upload to S3
       const fileBuffer = await fs.readFile(archivePath);
@@ -90,7 +97,11 @@ class S3SessionManager {
       const result = await this.s3.upload(uploadParams).promise();
       
       // Clean up local archive
-      await fs.unlink(archivePath);
+      try {
+        await fs.unlink(archivePath);
+      } catch (cleanupError) {
+        this.logger.debug(`⚠️ Could not cleanup archive file: ${cleanupError.message}`);
+      }
       
       this.logger.info(`✅ Session uploaded to S3: ${s3Key}`);
       return result.Location;
@@ -259,6 +270,15 @@ class S3SessionManager {
     try {
       const stats = await fs.stat(dirPath);
       return stats.isDirectory();
+    } catch {
+      return false;
+    }
+  }
+
+  async fileExists(filePath) {
+    try {
+      const stats = await fs.stat(filePath);
+      return stats.isFile();
     } catch {
       return false;
     }

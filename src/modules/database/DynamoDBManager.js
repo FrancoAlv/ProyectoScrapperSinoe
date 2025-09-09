@@ -128,6 +128,7 @@ class DynamoDBManager {
   async saveNotification(notification, sourceUrl) {
     try {
       const timestamp = new Date().toISOString();
+      const currentDate = new Date().toISOString().split('T')[0]; // YYYY-MM-DD format
       
       // Prepare DynamoDB item
       const item = {
@@ -140,7 +141,11 @@ class DynamoDBManager {
         fechaExtraccion: timestamp,
         ultimaActualizacion: timestamp,
         fuente: sourceUrl || 'SINOE',
-        numero: notification.numero || null
+        numero: notification.numero || null,
+        fechaCreacionItem: currentDate, // Date for filtering current day records
+        version: 0, // Initialize version for optimistic locking
+        envios: [], // Array to track all user sending statuses
+        hashContenido: this.generateContentHash(notification) // Hash to detect content changes
       };
 
       // Check if record already exists
@@ -155,7 +160,23 @@ class DynamoDBManager {
         const hasChanges = this.hasSignificantChanges(existingItem, item);
         if (hasChanges) {
           item.fechaCreacion = existingItem.fechaCreacion; // Preserve creation date
+          item.fechaCreacionItem = existingItem.fechaCreacionItem; // Preserve original item creation date
+          
+          // Preserve existing version and envios
+          item.version = existingItem.version || 0;
+          item.envios = Array.isArray(existingItem.envios) ? existingItem.envios : [];
+          
           item.ultimaActualizacion = timestamp; // Update modification date
+          
+          // If content changed, reset envios for re-sending
+          const oldHash = existingItem.hashContenido;
+          const newHash = item.hashContenido;
+          if (oldHash && newHash && oldHash !== newHash) {
+            this.logger.debug(`📝 Content changed for ${notification.numeroExpediente}-${notification.numeroNotificacion} - will resend to users`);
+            // Reset envios array to allow re-sending
+            item.envios = [];
+            item.version = 0; // Reset version as well
+          }
           
           await this.docClient.put({
             TableName: this.tableName,
@@ -266,6 +287,177 @@ class DynamoDBManager {
     }
   }
 
+  // Generate hash for content change detection
+  generateContentHash(notification) {
+    const crypto = require('crypto');
+    const content = `${notification.estado}-${notification.sumilla}-${notification.oficinaJudicial}-${notification.fecha}`;
+    return crypto.createHash('md5').update(content).digest('hex');
+  }
+
+  // New method to get today's notifications for WhatsApp sending
+  async getTodaysNotificationsForUser(userPhone) {
+    try {
+      if (!this.isInitialized) {
+        throw new Error('DynamoDB not initialized');
+      }
+
+      const currentDate = new Date().toISOString().split('T')[0]; // YYYY-MM-DD format
+      const phoneString = String(userPhone);
+      
+      // Get all today's notifications
+      const params = {
+        TableName: this.tableName,
+        FilterExpression: 'fechaCreacionItem = :currentDate',
+        ExpressionAttributeValues: {
+          ':currentDate': currentDate
+        }
+      };
+
+      const result = await this.docClient.scan(params).promise();
+      const allItems = result.Items || [];
+      
+      // Filter out notifications already sent to this user
+      const notSentToUser = allItems.filter(item => {
+        if (!Array.isArray(item.envios)) return true;
+        
+        // Check if user already has an envio record
+        const userEnvio = item.envios.find(envio => envio.user === phoneString);
+        return !userEnvio || !userEnvio.enviado;
+      });
+
+      return notSentToUser;
+
+    } catch (error) {
+      this.logger.error(`❌ Error getting today's notifications for user ${userPhone}:`, error.message);
+      return [];
+    }
+  }
+
+  // Mark user as notified for specific notifications (automatic after sending)
+  async markUserAsNotified(numeroExpediente, numeroNotificacion, userPhone) {
+    if (!this.isInitialized) throw new Error('DynamoDB not initialized');
+
+    const timestamp = new Date().toISOString();
+    const phoneString = String(userPhone);
+
+    try {
+      // 1) GET actual (solo necesitamos envios y version para optimistic locking)
+      const { Item } = await this.docClient.get({
+        TableName: this.tableName,
+        Key: { numeroExpediente, numeroNotificacion },
+        ProjectionExpression: '#e, #v',
+        ExpressionAttributeNames: { '#e': 'envios', '#v': 'version' }
+      }).promise();
+
+      const prevVersion = Item?.version ?? 0;
+      const envios = Array.isArray(Item?.envios) ? [...Item.envios] : [];
+
+      // 2) Merge/dedupe en memoria
+      const idx = envios.findIndex(x => x?.user === phoneString);
+      const nuevoEnvio = { 
+        user: phoneString, 
+        enviado: true, 
+        fechaEnvio: timestamp, 
+        procesado: true 
+      };
+      
+      if (idx >= 0) {
+        // Actualizar registro existente
+        envios[idx] = { ...envios[idx], ...nuevoEnvio };
+      } else {
+        // Agregar nuevo registro
+        envios.push(nuevoEnvio);
+      }
+
+      // 3) UPDATE con condición de versión (optimistic locking)
+      await this.docClient.update({
+        TableName: this.tableName,
+        Key: { numeroExpediente, numeroNotificacion },
+        UpdateExpression: 'SET #e = :newEnvios, #v = if_not_exists(#v, :zero) + :one, #ua = :ts',
+        ConditionExpression: 'attribute_not_exists(#v) OR #v = :prevVersion',
+        ExpressionAttributeNames: { 
+          '#e': 'envios', 
+          '#v': 'version', 
+          '#ua': 'ultimaActualizacion' 
+        },
+        ExpressionAttributeValues: {
+          ':newEnvios': envios,
+          ':prevVersion': prevVersion,
+          ':zero': 0,
+          ':one': 1,
+          ':ts': timestamp
+        },
+        ReturnValues: 'UPDATED_NEW'
+      }).promise();
+
+      this.logger.debug(`✅ Marked user ${phoneString} as notified and processed for ${numeroExpediente}-${numeroNotificacion}`);
+      return true;
+
+    } catch (error) {
+      if (error.code === 'ConditionalCheckFailedException') {
+        this.logger.debug(`⚠️ Optimistic lock failed for ${numeroExpediente}-${numeroNotificacion}. Another process updated it.`);
+        // En un sistema de alto volumen podrías reintentar aquí
+        return false;
+      }
+      
+      this.logger.error(`❌ Error marking user as notified: ${error.message}`);
+      return false;
+    }
+  }
+
+  // Get send status for user (replaced read status)
+  async getUserSendStatus(numeroExpediente, numeroNotificacion, userPhone) {
+    try {
+      if (!this.isInitialized) {
+        throw new Error('DynamoDB not initialized');
+      }
+
+      const result = await this.docClient.get({
+        TableName: this.tableName,
+        Key: {
+          numeroExpediente: numeroExpediente,
+          numeroNotificacion: numeroNotificacion
+        }
+      }).promise();
+
+      if (result.Item) {
+        const userPhoneKey = userPhone.replace(/[^a-zA-Z0-9]/g, '_');
+        return result.Item.estadosEnvio?.[userPhoneKey] || null;
+      }
+      
+      return null;
+
+    } catch (error) {
+      this.logger.error(`❌ Error getting user send status: ${error.message}`);
+      return null;
+    }
+  }
+
+  // Get notifications with send status for formatting
+  async getNotificationsWithSendStatus(notifications, userPhone) {
+    try {
+      const notificationsWithStatus = [];
+      
+      for (const notification of notifications) {
+        const userPhoneKey = userPhone.replace(/[^a-zA-Z0-9]/g, '_');
+        const sendStatus = notification.estadosEnvio?.[userPhoneKey];
+        
+        notificationsWithStatus.push({
+          ...notification,
+          wasSent: sendStatus?.enviado || false,
+          sendDate: sendStatus?.fechaEnvio || null,
+          isProcessed: sendStatus?.procesado || false
+        });
+      }
+      
+      return notificationsWithStatus;
+
+    } catch (error) {
+      this.logger.error(`❌ Error getting notifications with send status: ${error.message}`);
+      return notifications; // Return original notifications if error
+    }
+  }
+
   async getStats() {
     try {
       if (!this.isInitialized) {
@@ -273,7 +465,8 @@ class DynamoDBManager {
           enabled: false, 
           error: 'Not initialized',
           totalItems: 0,
-          openNotifications: 0
+          openNotifications: 0,
+          todaysNotifications: 0
         };
       }
 
@@ -285,6 +478,17 @@ class DynamoDBManager {
       // Count open notifications
       const openNotifications = await this.getOpenNotifications(1000);
 
+      // Count today's notifications
+      const currentDate = new Date().toISOString().split('T')[0];
+      const todaysParams = {
+        TableName: this.tableName,
+        FilterExpression: 'fechaCreacionItem = :currentDate',
+        ExpressionAttributeValues: {
+          ':currentDate': currentDate
+        }
+      };
+      const todaysResult = await this.docClient.scan(todaysParams).promise();
+
       return {
         enabled: true,
         tableName: this.tableName,
@@ -292,6 +496,7 @@ class DynamoDBManager {
         totalItems: tableInfo.Table.ItemCount || 0,
         tableSize: tableInfo.Table.TableSizeBytes || 0,
         openNotifications: openNotifications.length,
+        todaysNotifications: (todaysResult.Items || []).length,
         region: this.config.region || 'us-east-1'
       };
 
@@ -300,7 +505,8 @@ class DynamoDBManager {
         enabled: false,
         error: error.message,
         totalItems: 0,
-        openNotifications: 0
+        openNotifications: 0,
+        todaysNotifications: 0
       };
     }
   }

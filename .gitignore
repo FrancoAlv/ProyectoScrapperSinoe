@@ -48,3 +48,5 @@ tmp/
 temp/
 ./template.yaml
 template.yaml
+.wwebjs_auth
+.wwebjs_cache
